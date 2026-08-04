@@ -1,43 +1,44 @@
-name: Monitor Al Hadath for Iran news
+name: Monitor Iran News
 
 on:
   schedule:
-    # Runs every 5 minutes. Combined with the fact that a story has to
-    # already be published when we poll, real-world delay ends up in the
-    # ~5-10 minute range.
-    - cron: "*/5 * * * *"
-  workflow_dispatch: {}  # lets you trigger a run manually from the Actions tab
+    - cron: '*/5 * * * *'  # Runs every 5 minutes
+  workflow_dispatch:      # Allows manual triggers from the GitHub UI
 
-# Avoid two runs overlapping and racing on state/seen.json
-concurrency:
-  group: alhadath-monitor
-  cancel-in-progress: false
+# Give the GITHUB_TOKEN write access to commit state back to the repo
+permissions:
+  contents: write
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check out repo
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
 
-      - name: Run bot
+      - name: Run news bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
-        run: python bot.py
+        run: |
+          python bot.py
 
-      - name: Commit updated state (dedup list)
+      - name: Commit state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p state
+          touch state/seen.json
           git add state/seen.json
           git diff --quiet --cached || git commit -m "Update seen articles state [skip ci]"
           git push
