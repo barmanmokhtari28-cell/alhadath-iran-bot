@@ -139,6 +139,8 @@ def extract_links_from_html(base_url: str, html_text: str) -> dict:
     soup = BeautifulSoup(html_text, "html.parser")
     for a in soup.find_all("a", href=True):
         href = urljoin(base_url, a["href"])
+        if "alhadath.net" not in href:
+            continue
         if not re.search(r"/\d{4}/\d{2}/\d{2}/", href):
             continue
         link_text = a.get_text(strip=True)
@@ -152,11 +154,26 @@ def extract_links_from_html(base_url: str, html_text: str) -> dict:
 
 def extract_links_from_text(text: str) -> dict:
     """Returns {absolute_url: link_text} for article links found in
-    markdown/plain-text page content (e.g. from the r.jina.ai proxy),
-    which represents links as [text](url)."""
+    markdown/plain-text page content (e.g. from the r.jina.ai proxy).
+
+    Listing pages render article links as nested image-links:
+        [![caption](https://vid.alarabiya.net/images/2026/08/04/...jpg)](https://www.alhadath.net/2026/08/04/slug)
+    A naive "[text](url)" regex matches the *inner* image link first (its
+    URL also happens to contain a date pattern, so it slips past the date
+    filter) and never reaches the real article URL. Collapsing the inner
+    image markdown down to its caption text first fixes that.
+    """
+    # ![caption](img_url)  ->  caption
+    cleaned = re.sub(r"!\[([^\]]*)\]\([^\)]*\)", r"\1", text)
+
     links = {}
-    for match in re.finditer(r"\[([^\]]*)\]\((https?://[^\s\)]+)\)", text):
+    for match in re.finditer(r"\[([^\]]*)\]\((https?://[^\s\)]+)\)", cleaned):
         link_text, href = match.group(1).strip(), match.group(2).strip()
+        # Restrict to alhadath.net itself -- excludes any stray links to
+        # vid.alarabiya.net, social share links, etc. that might otherwise
+        # match the date pattern below.
+        if "alhadath.net" not in href:
+            continue
         if not re.search(r"/\d{4}/\d{2}/\d{2}/", href):
             continue
         if href not in links or len(link_text) > len(links[href]):
