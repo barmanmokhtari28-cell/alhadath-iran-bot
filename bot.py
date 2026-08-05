@@ -115,7 +115,11 @@ def fetch_url(url: str):
     # since a rate-limit notice or interstitial page can also come back as
     # a "successful" 200 response with a small, useless body.
     proxies = [
-        ("r.jina.ai", f"https://r.jina.ai/{url}", {}),
+        (
+            "r.jina.ai",
+            f"https://r.jina.ai/{url}",
+            {"X-With-Links-Summary": "all", "X-Respond-With": "markdown"},
+        ),
         ("allorigins/raw", f"https://api.allorigins.win/raw?url={quote(url, safe='')}", {}),
         ("corsproxy.io", f"https://corsproxy.io/?url={quote(url, safe='')}", {}),
     ]
