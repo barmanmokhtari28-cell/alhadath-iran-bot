@@ -106,27 +106,42 @@ def fetch_url(url: str):
     except requests.RequestException as e:
         print(f"[fetch] direct request to {url} failed ({e}), trying proxy")
 
-    # 2) r.jina.ai reader proxy -- fetches + renders the page server-side and
-    # returns clean text/markdown (title, then "Markdown Content:" body).
-    try:
-        resp = requests.get(f"https://r.jina.ai/{url}", timeout=25)
-        if resp.status_code == 200 and resp.text.strip():
-            return resp.text, "text"
-        print(f"[fetch] r.jina.ai proxy for {url} returned {resp.status_code}, trying next fallback")
-    except requests.RequestException as e:
-        print(f"[fetch] r.jina.ai proxy for {url} failed: {e}")
+    # Proxy fallbacks, tried in order. Free proxy/reader services are often
+    # rate-limited *per IP*, and GitHub Actions runners share IP pools with
+    # a huge number of other users -- so a method that worked a minute ago
+    # can be silently throttled on the next run. To catch that, we don't
+    # just check for HTTP 200: we require the response to actually look
+    # like the real page (mentions alhadath.net, isn't suspiciously short),
+    # since a rate-limit notice or interstitial page can also come back as
+    # a "successful" 200 response with a small, useless body.
+    proxies = [
+        ("r.jina.ai", f"https://r.jina.ai/{url}", {}),
+        ("allorigins/raw", f"https://api.allorigins.win/raw?url={quote(url, safe='')}", {}),
+        ("corsproxy.io", f"https://corsproxy.io/?url={quote(url, safe='')}", {}),
+    ]
 
-    # 3) allorigins.win CORS proxy -- returns the raw HTML as fetched from
-    # their servers.
-    try:
-        resp = requests.get(
-            f"https://api.allorigins.win/raw?url={quote(url, safe='')}", timeout=25
-        )
-        if resp.status_code == 200 and resp.text.strip():
-            return resp.text, "html"
-        print(f"[fetch] allorigins proxy for {url} returned {resp.status_code}")
-    except requests.RequestException as e:
-        print(f"[fetch] allorigins proxy for {url} failed: {e}")
+    for name, proxy_url, extra_headers in proxies:
+        for attempt in (1, 2):
+            try:
+                resp = requests.get(proxy_url, headers=extra_headers, timeout=25)
+            except requests.RequestException as e:
+                print(f"[fetch] {name} attempt {attempt} for {url} failed: {e}")
+                continue
+
+            body = resp.text or ""
+            looks_valid = resp.status_code == 200 and len(body) > 500 and "alhadath" in body.lower()
+
+            if looks_valid:
+                print(f"[fetch] {name} succeeded for {url} ({len(body)} chars)")
+                mode = "text" if name == "r.jina.ai" else "html"
+                return body, mode
+
+            print(
+                f"[fetch] {name} attempt {attempt} for {url} looked invalid "
+                f"(status={resp.status_code}, len={len(body)}, "
+                f"preview={body[:120]!r})"
+            )
+            time.sleep(2)
 
     print(f"[fetch] all methods failed for {url}")
     return None, None
