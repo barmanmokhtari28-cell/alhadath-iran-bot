@@ -52,7 +52,7 @@ IRAN_KEYWORDS = [
 ]
 
 CAPTION_LINK_TEXT = "🇸🇦 🚨الـحــــدث"
-FOOTER = "🤖@secretollah\n\n#الحدث\n#فوری"
+FOOTER = "🤖 @secretollah\n\n#الحدث\n#فوری"
 
 
 # ---------------------------------------------------------------------------
