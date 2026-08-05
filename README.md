@@ -7,9 +7,28 @@ Telegram channel with rich formatting.
 ## How it works
 
 - A GitHub Actions workflow runs `bot.py` every **5 minutes**.
-- The script tries Al Hadath's RSS feed first; if that doesn't return
-  anything, it falls back to scraping the homepage / news listing and
-  reading each article's `og:title` / `og:description` tags.
+- The script fetches alhadath.net directly — the homepage plus every
+  section page (News, Yemen, Syria, Egypt, Iraq, Maghreb). Al Hadath has
+  no working RSS feed and no dedicated Iran section, so Iran stories can
+  land under any of these; checking all of them every run is what makes
+  this reliable. (An earlier version tried Google News' index of the
+  site instead — it turned out to be too sparse/delayed and missed real
+  stories, so this version goes straight to the source.)
+- **Proxy fallback**: alhadath.net blocks requests coming from GitHub
+  Actions' IP ranges (403 Forbidden) — a datacenter-IP block on their
+  end that no amount of header-tweaking gets around. So every fetch
+  tries a direct request first, and if that's blocked, falls back to
+  fetching the same page through a reader/proxy service
+  ([r.jina.ai](https://r.jina.ai), then
+  [allorigins.win](https://allorigins.win) as a second fallback) whose
+  IPs aren't blocked. This is all handled by `fetch_url()` in `bot.py` —
+  nothing to configure, but worth knowing if you ever see `[fetch] ...`
+  lines in the logs.
+- For each candidate article link, it first checks the headline text
+  already visible on the listing page against the Iran keyword list. If
+  that text is missing or looks relevant, it fetches the full article
+  page's `og:title` / `og:description` for an accurate title + summary
+  before deciding for sure.
 - Articles are filtered by an Iran-related keyword list (`IRAN_KEYWORDS`
   in `bot.py` — edit this list to tune what counts as "Iran-related").
 - Already-posted links are tracked in `state/seen.json`, which the
@@ -58,22 +77,11 @@ Telegram channel with rich formatting.
    ("Monitor Al Hadath for Iran news" → Run workflow) to test it right
    away instead of waiting for the schedule.
 
-## Important: verify the RSS feed URL
-
-Al Hadath doesn't publish an RSS index page the way its sister site
-alarabiya.net does (`alarabiya.net/tools/mrss`), so `bot.py` guesses a
-few likely RSS URLs based on the pattern Al Arabiya's CMS uses
-(`RSS_CANDIDATES` near the top of the file). **Check the Actions logs
-after your first run(s)** — the script prints `[rss] got N entries from
-<url>` if one of the guesses worked, or `[scrape] ...` lines if it had
-to fall back to scraping. If RSS never works, the scrape fallback still
-covers you, but it's worth spending 2 minutes checking
-`view-source:https://www.alhadath.net/` for a `<link type="application/rss+xml">`
-tag, or trying feed URLs directly in a browser, and updating
-`RSS_CANDIDATES` if you find the real one — RSS is more reliable and
-faster than scraping.
-
 ## Tuning
+
+- **Which pages get scraped**: `SCRAPE_PAGES` in `bot.py`. Add more
+  section URLs here if you find Iran coverage showing up somewhere not
+  already on the list.
 
 - **Keyword list**: `IRAN_KEYWORDS` in `bot.py`. Add terms (e.g. more
   officials' names, "الاتفاق النووي", etc.) as needed.
@@ -83,7 +91,11 @@ faster than scraping.
   given the requested 5-10 min delay.
 - **Message format**: `build_message()` in `bot.py`.
 - **How many old links to remember for dedup**: `MAX_SEEN_KEEP` in
-  `bot.py` (default 500).
+  `bot.py` (default 1500).
+- **How many full articles to fetch per run**: `MAX_ARTICLE_FETCHES_PER_RUN`
+  in `bot.py` (default 40) — a safety cap so one run never fetches an
+  unreasonable number of article pages; raise it if you have a lot of
+  Iran coverage landing at once and some is getting skipped.
 
 ## Local testing
 
