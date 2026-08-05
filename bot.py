@@ -30,7 +30,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -64,7 +64,10 @@ MAX_ARTICLE_FETCHES_PER_RUN = 40
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ar,en-US;q=0.8,en;q=0.6",
+    "Referer": "https://www.google.com/",
 }
 
 # Iran-related keywords to filter on (Arabic). Add/remove terms as needed.
@@ -76,6 +79,129 @@ IRAN_KEYWORDS = [
 
 CAPTION_LINK_TEXT = "🇸🇦 🚨الـحــــدث"
 FOOTER = "🤖@secretollah\n\n#الحدث\n#فوری"
+
+
+# ---------------------------------------------------------------------------
+# Fetching with proxy fallback
+# ---------------------------------------------------------------------------
+# alhadath.net (and sites on the same network) return 403 Forbidden to
+# requests coming straight from GitHub Actions' IP ranges -- that's a
+# datacenter-IP block on their end, not something fixable with headers.
+# So: try a direct request first (works fine for local/manual runs), and if
+# that gets blocked, fall back to fetching the page through a proxy/reader
+# service instead, whose IPs aren't in that blocklist.
+#
+# Returns (content, mode) where mode is "html" (raw HTML, parse with
+# BeautifulSoup as normal) or "text" (already-extracted readable text/
+# markdown from a reader proxy -- parse with the *_from_text() helpers).
+# Returns (None, None) if every method failed.
+
+def fetch_url(url: str):
+    # 1) Direct request.
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code == 200:
+            return resp.text, "html"
+        print(f"[fetch] direct request to {url} returned {resp.status_code}, trying proxy")
+    except requests.RequestException as e:
+        print(f"[fetch] direct request to {url} failed ({e}), trying proxy")
+
+    # 2) r.jina.ai reader proxy -- fetches + renders the page server-side and
+    # returns clean text/markdown (title, then "Markdown Content:" body).
+    try:
+        resp = requests.get(f"https://r.jina.ai/{url}", timeout=25)
+        if resp.status_code == 200 and resp.text.strip():
+            return resp.text, "text"
+        print(f"[fetch] r.jina.ai proxy for {url} returned {resp.status_code}, trying next fallback")
+    except requests.RequestException as e:
+        print(f"[fetch] r.jina.ai proxy for {url} failed: {e}")
+
+    # 3) allorigins.win CORS proxy -- returns the raw HTML as fetched from
+    # their servers.
+    try:
+        resp = requests.get(
+            f"https://api.allorigins.win/raw?url={quote(url, safe='')}", timeout=25
+        )
+        if resp.status_code == 200 and resp.text.strip():
+            return resp.text, "html"
+        print(f"[fetch] allorigins proxy for {url} returned {resp.status_code}")
+    except requests.RequestException as e:
+        print(f"[fetch] allorigins proxy for {url} failed: {e}")
+
+    print(f"[fetch] all methods failed for {url}")
+    return None, None
+
+
+def extract_links_from_html(base_url: str, html_text: str) -> dict:
+    """Returns {absolute_url: link_text} for every alhadath.net article
+    link found in a page of HTML."""
+    links = {}
+    soup = BeautifulSoup(html_text, "html.parser")
+    for a in soup.find_all("a", href=True):
+        href = urljoin(base_url, a["href"])
+        if not re.search(r"/\d{4}/\d{2}/\d{2}/", href):
+            continue
+        link_text = a.get_text(strip=True)
+        if not link_text:
+            img = a.find("img", alt=True)
+            link_text = img["alt"].strip() if img else ""
+        if href not in links or len(link_text) > len(links[href]):
+            links[href] = link_text
+    return links
+
+
+def extract_links_from_text(text: str) -> dict:
+    """Returns {absolute_url: link_text} for article links found in
+    markdown/plain-text page content (e.g. from the r.jina.ai proxy),
+    which represents links as [text](url)."""
+    links = {}
+    for match in re.finditer(r"\[([^\]]*)\]\((https?://[^\s\)]+)\)", text):
+        link_text, href = match.group(1).strip(), match.group(2).strip()
+        if not re.search(r"/\d{4}/\d{2}/\d{2}/", href):
+            continue
+        if href not in links or len(link_text) > len(links[href]):
+            links[href] = link_text
+    return links
+
+
+def parse_article_from_html(url: str, html_text: str) -> dict | None:
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    def meta_content(prop):
+        tag = soup.find("meta", attrs={"property": prop}) or soup.find("meta", attrs={"name": prop})
+        return tag["content"].strip() if tag and tag.get("content") else ""
+
+    title = meta_content("og:title") or (soup.title.string.strip() if soup.title else "")
+    summary = meta_content("og:description") or meta_content("description")
+
+    if not title:
+        return None
+    return {"title": html.unescape(title), "summary": html.unescape(summary), "link": url}
+
+
+def parse_article_from_text(url: str, text: str) -> dict | None:
+    """Parse the reader-proxy output format:
+        Title: ...
+        URL Source: ...
+        Markdown Content:
+        <article body>
+    """
+    title_match = re.search(r"^Title:\s*(.+)$", text, re.MULTILINE)
+    title = title_match.group(1).strip() if title_match else ""
+
+    idx = text.find("Markdown Content:")
+    body = text[idx + len("Markdown Content:"):].strip() if idx != -1 else text
+    # First non-empty paragraph as the summary/lead.
+    summary = ""
+    for para in body.split("\n"):
+        para = para.strip().lstrip("#").strip()
+        if len(para) > 20:
+            summary = para[:400]
+            break
+
+    if not title:
+        return None
+    return {"title": title, "summary": summary, "link": url}
 
 
 # ---------------------------------------------------------------------------
@@ -104,64 +230,35 @@ def save_seen(seen: set) -> None:
 # ---------------------------------------------------------------------------
 
 def collect_candidate_links() -> dict:
-    """Scrape every page in SCRAPE_PAGES and collect article links along
-    with whatever visible link text is sitting right there in the listing
-    (headline text, sometimes an image alt text). Returns {link: text}."""
+    """Fetch every page in SCRAPE_PAGES (direct, falling back to a proxy if
+    blocked) and collect article links along with whatever visible link
+    text is sitting right there in the listing. Returns {link: text}."""
     candidates = {}
 
     for page_url in SCRAPE_PAGES:
-        try:
-            resp = requests.get(page_url, headers=HEADERS, timeout=15)
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            print(f"[scrape] failed to load {page_url}: {e}")
+        content, mode = fetch_url(page_url)
+        if content is None:
             continue
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            href = urljoin(page_url, a["href"])
-            # Article URLs on alhadath.net look like:
-            # https://www.alhadath.net/2026/08/04/<slug>
-            # (some sections nest it one level deeper, e.g. /syria/2026/08/04/<slug>)
-            if not re.search(r"/\d{4}/\d{2}/\d{2}/", href):
-                continue
-
-            link_text = a.get_text(strip=True)
-            if not link_text:
-                img = a.find("img", alt=True)
-                link_text = img["alt"].strip() if img else ""
-
-            # Keep the longest text we've seen for a given link -- listing
-            # pages often repeat the same article as both an image link and
-            # a plain text link, and the text link is usually more complete.
-            if href not in candidates or len(link_text) > len(candidates[href]):
-                candidates[href] = link_text
+        page_links = (
+            extract_links_from_html(page_url, content) if mode == "html"
+            else extract_links_from_text(content)
+        )
+        for href, text in page_links.items():
+            if href not in candidates or len(text) > len(candidates[href]):
+                candidates[href] = text
 
     print(f"[scrape] found {len(candidates)} candidate article links across {len(SCRAPE_PAGES)} pages")
     return candidates
 
 
 def fetch_article_meta(url: str) -> dict | None:
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[scrape] failed to load article {url}: {e}")
+    content, mode = fetch_url(url)
+    if content is None:
         return None
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    def meta_content(prop):
-        tag = soup.find("meta", attrs={"property": prop}) or soup.find("meta", attrs={"name": prop})
-        return tag["content"].strip() if tag and tag.get("content") else ""
-
-    title = meta_content("og:title") or (soup.title.string.strip() if soup.title else "")
-    summary = meta_content("og:description") or meta_content("description")
-
-    if not title:
-        return None
-
-    return {"title": html.unescape(title), "summary": html.unescape(summary), "link": url}
+    if mode == "html":
+        return parse_article_from_html(url, content)
+    return parse_article_from_text(url, content)
 
 
 def get_latest_articles(seen: set) -> list[dict]:
